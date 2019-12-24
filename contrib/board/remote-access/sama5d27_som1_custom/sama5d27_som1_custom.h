@@ -89,21 +89,6 @@
 #endif
 
 /*
- * NandFlash Settings
- */
-#define CONFIG_SYS_NAND_BASE            AT91C_BASE_CS3
-#define CONFIG_SYS_NAND_MASK_ALE        (1 << 21)
-#define CONFIG_SYS_NAND_MASK_CLE        (1 << 22)
-
-#define CONFIG_SYS_NAND_OE_PIN		AT91C_PIN_PA(12)
-#define CONFIG_SYS_NAND_WE_PIN		AT91C_PIN_PA(8)
-#define CONFIG_SYS_NAND_ALE_PIN		AT91C_PIN_PA(10)
-#define CONFIG_SYS_NAND_CLE_PIN		AT91C_PIN_PA(11)
-#define CONFIG_SYS_NAND_ENABLE_PIN      AT91C_PIN_PA(21)
-
-#define NO_GALOIS_TABLE_IN_ROM
-
-/*
  * SDHC Settings
  */
 #ifdef CONFIG_SDHC0
@@ -115,5 +100,12 @@
 #define CONFIG_SYS_BASE_SDHC	AT91C_BASE_SDHC1
 #define CONFIG_SYS_ID_SDHC	AT91C_ID_SDMMC1
 #endif
+
+/*
+ * LEDs
+ */
+#define CONFIG_SYS_LED_RED_PIN      AT91C_PIN_PA(10)
+#define CONFIG_SYS_LED_GREEN_PIN    AT91C_PIN_PB(1)
+#define CONFIG_SYS_LED_BLUE_PIN     AT91C_PIN_PA(31)
 
 #endif

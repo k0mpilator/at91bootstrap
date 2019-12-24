@@ -38,12 +38,12 @@
 #include "timer.h"
 #include "usart.h"
 #include "watchdog.h"
+#include "sdhc_cal.h"
 #include "arch/at91_ddrsdrc.h"
 #include "arch/at91_pio.h"
-#include "arch/at91_pmc.h"
+#include "arch/at91_pmc/pmc.h"
 #include "arch/at91_rstc.h"
 #include "arch/at91_sfr.h"
-#include "arch/sama5_smc.h"
 #include "arch/tz_matrix.h"
 
 static void at91_dbgu_hw_init(void)
@@ -55,7 +55,7 @@ static void at91_dbgu_hw_init(void)
 	};
 
 	pio_configure(dbgu_pins);
-	pmc_sam9x5_enable_periph_clk(CONFIG_SYS_DBGU_ID);
+	pmc_enable_periph_clock(CONFIG_SYS_DBGU_ID);
 }
 
 static void initialize_dbgu(void)
@@ -257,7 +257,12 @@ static void ddramc_reg_config(struct ddramc_register *ddramc_config)
 			    AT91C_DDRC2_DECOD_INTERLEAVED |
 			    AT91C_DDRC2_UNAL_SUPPORTED;
 
-	ddramc_config->rtr = 0x511;
+	/*
+	 * With DDRCK running at 164 MHz (DDRCK = 2 x MCK / 2),
+	 * MPDDRC_RTR.COUNT should equal 0x4ff, which results in tREFI
+	 * (COUNT / MASTER_CLOCK) remaining under 7.8 us (Winbond's max).
+	 */
+	ddramc_config->rtr = 0x4FF;
 
 	ddramc_config->t0pr = AT91C_DDRC2_TRAS_(7) |
 			      AT91C_DDRC2_TRCD_(3) |
@@ -320,23 +325,81 @@ void at91_init_can_message_ram(void)
 	       (AT91C_BASE_SFR + SFR_CAN));
 }
 
-static void at91_red_led_on(void)
+static void led_hw_init(void)
 {
-	pio_set_gpio_output(AT91C_PIN_PA(27), 0);
+	const struct pio_desc led_pins[] = {
+		{"LED_RED", CONFIG_SYS_LED_RED_PIN, 0, PIO_PULLUP, PIO_OUTPUT},
+		{"LED_GREEN", CONFIG_SYS_LED_GREEN_PIN, 0, PIO_PULLUP, PIO_OUTPUT},
+		{"LED_BLUE", CONFIG_SYS_LED_BLUE_PIN, 0, PIO_PULLUP, PIO_OUTPUT},
+		{(char *)0, 0, 0, PIO_DEFAULT, PIO_PERIPH_A}
+	};
+
+	pio_configure(led_pins);
 }
+
+static void at91_led_on(void)
+{
+	pio_set_gpio_output(CONFIG_SYS_LED_GREEN_PIN, 1);
+}
+
+static void sdmmc_cal_setup(void)
+{
+	unsigned int cidr, exid;
+	unsigned int reg;
+
+	/* Identify SAMA5D2 SiP that are concerned by the errata */
+	cidr = readl(AT91C_BASE_CHIPID + CHIPID_CIDR);
+	if ((cidr & 0x7fffffe0) != SAMA5D2_CIDR)
+		return;
+
+	exid = readl(AT91C_BASE_CHIPID + CHIPID_EXID);
+	if (exid != SAMA5D225C_D1M_EXID
+	 && exid != SAMA5D27C_D1G_EXID
+	 && exid != SAMA5D28C_D1G_EXID)
+		return;
+
+	/*
+	 * Even if SDMMC interfaces are not in use, enable the
+	 * calibration analog cell and make it remain powered after
+	 * calibration procedure is done.
+	 * It's needed on SDMMC0 only
+	 */
+	dbg_loud("Applying VDDSDMMC errata to ID: %x\n", exid);
+
+	/* Enable peripheral clock */
+	pmc_enable_periph_clock(AT91C_ID_SDMMC0);
+
+	/* Launch calibration and wait till it's completed */
+	reg = readl(AT91C_BASE_SDHC0 + SDMMC_CALCR);
+	reg |= SDMMC_CALCR_ALWYSON | SDMMC_CALCR_EN;
+	writel(reg, AT91C_BASE_SDHC0 + SDMMC_CALCR);
+	while (readl(AT91C_BASE_SDHC0 + SDMMC_CALCR) & SDMMC_CALCR_EN)
+		;
+
+	/* Disable peripheral clock */
+	pmc_disable_periph_clock(AT91C_ID_SDMMC0);
+}
+
 
 #ifdef CONFIG_HW_INIT
 void hw_init(void)
 {
 	at91_disable_wdt();
 
-	at91_red_led_on();
+	led_hw_init();
+
+	at91_led_on();
 
 	pmc_cfg_plla(PLLA_SETTINGS);
 
 	/* Initialize PLLA charge pump */
-	/* No need: we keep what is set in ROM code */
-	//pmc_init_pll(0x3);
+	/*
+	 * The field named ICP_PLLA[1:0] must be written to 0.
+	 * Even if its default value is 0, it is wrongly re-written to 0x3
+	 * by the ROMCode.
+	 */
+	pmc_init_pll(AT91C_PMC_ICPPLLA_0);
+
 	pmc_cfg_mck(BOARD_PRESCALER_PLLA);
 
 	writel(AT91C_RSTC_KEY_UNLOCK | AT91C_RSTC_URSTEN,
@@ -355,6 +418,9 @@ void hw_init(void)
 	l2cache_prepare();
 
 	at91_init_can_message_ram();
+
+	/* SiP: Implement the VDDSDMMC power supply over-consumption errata */
+	sdmmc_cal_setup();
 }
 #endif
 
@@ -436,67 +502,9 @@ void at91_qspi_hw_init(void)
 #endif
 
 	pio_configure(qspi_pins);
-	pmc_sam9x5_enable_periph_clk(CONFIG_SYS_ID_QSPI);
+	pmc_enable_periph_clock(CONFIG_SYS_ID_QSPI);
 }
 #endif
-
-#ifdef CONFIG_NANDFLASH
-void nandflash_hw_init(void)
-{
-	const struct pio_desc nand_pins[] = {
-		{"NANDOE", CONFIG_SYS_NAND_OE_PIN, 0, PIO_PULLUP, PIO_PERIPH_F},
-		{"NANDWE", CONFIG_SYS_NAND_WE_PIN, 0, PIO_PULLUP, PIO_PERIPH_F},
-		{"NANDALE", CONFIG_SYS_NAND_ALE_PIN, 0, PIO_PULLUP, PIO_PERIPH_F},
-		{"NANDCLE", CONFIG_SYS_NAND_CLE_PIN, 0, PIO_PULLUP, PIO_PERIPH_F},
-		{"NANDCS", CONFIG_SYS_NAND_ENABLE_PIN, 1, PIO_DEFAULT, PIO_OUTPUT},
-		{"D0", AT91C_PIN_PA(0), 0, PIO_DRVSTR_ME, PIO_PERIPH_F},
-		{"D1", AT91C_PIN_PA(1), 0, PIO_DRVSTR_ME, PIO_PERIPH_F},
-		{"D2", AT91C_PIN_PA(2), 0, PIO_DRVSTR_ME, PIO_PERIPH_F},
-		{"D3", AT91C_PIN_PA(3), 0, PIO_DRVSTR_ME, PIO_PERIPH_F},
-		{"D4", AT91C_PIN_PA(4), 0, PIO_DRVSTR_ME, PIO_PERIPH_F},
-		{"D5", AT91C_PIN_PA(5), 0, PIO_DRVSTR_ME, PIO_PERIPH_F},
-		{"D6", AT91C_PIN_PA(6), 0, PIO_DRVSTR_ME, PIO_PERIPH_F},
-		{"D7", AT91C_PIN_PA(7), 0, PIO_DRVSTR_ME, PIO_PERIPH_F},
-		{(char *)0, 0, 0, PIO_DEFAULT, PIO_PERIPH_A},
-	};
-
-	pio_configure(nand_pins);
-	pmc_sam9x5_enable_periph_clk(AT91C_ID_HSMC);
-
-	/* EBI Configuration Register */
-	writel((AT91C_EBICFG_DRIVE0_HIGH |
-		AT91C_EBICFG_PULL0_NONE |
-		AT91C_EBICFG_DRIVE1_HIGH |
-		AT91C_EBICFG_PULL1_NONE), SFR_EBICFG + AT91C_BASE_SFR);
-
-	/* Configure SMC CS3 for NAND/SmartMedia */
-	writel(AT91C_SMC_SETUP_NWE(1) |
-	       AT91C_SMC_SETUP_NCS_WR(1) |
-	       AT91C_SMC_SETUP_NRD(1) |
-	       AT91C_SMC_SETUP_NCS_RD(1), (ATMEL_BASE_SMC + SMC_SETUP3));
-
-	writel(AT91C_SMC_PULSE_NWE(2) |
-	       AT91C_SMC_PULSE_NCS_WR(3) |
-	       AT91C_SMC_PULSE_NRD(2) |
-	       AT91C_SMC_PULSE_NCS_RD(3), (ATMEL_BASE_SMC + SMC_PULSE3));
-
-	writel(AT91C_SMC_CYCLE_NWE(5) |
-	       AT91C_SMC_CYCLE_NRD(5), (ATMEL_BASE_SMC + SMC_CYCLE3));
-
-	writel(AT91C_SMC_TIMINGS_TCLR(2) |
-	       AT91C_SMC_TIMINGS_TADL(7) |
-	       AT91C_SMC_TIMINGS_TAR(2) |
-	       AT91C_SMC_TIMINGS_TRR(3) |
-	       AT91C_SMC_TIMINGS_TWB(7) |
-	       AT91C_SMC_TIMINGS_RBNSEL(2) |
-	       AT91C_SMC_TIMINGS_NFSEL, (ATMEL_BASE_SMC + SMC_TIMINGS3));
-
-	writel(AT91C_SMC_MODE_READMODE_NRD_CTRL |
-	       AT91C_SMC_MODE_WRITEMODE_NWE_CTRL |
-	       AT91C_SMC_MODE_DBW_8 |
-	       AT91C_SMC_MODE_TDF_CYCLES(1), (ATMEL_BASE_SMC + SMC_MODE3));
-}
-#endif /* CONFIG_NANDFLASH */
 
 #ifdef CONFIG_SDCARD
 #ifdef CONFIG_OF_LIBFDT
@@ -510,6 +518,8 @@ void at91_board_set_dtb_name(char *of_name)
 
 void at91_sdhc_hw_init(void)
 {
+	unsigned int reg;
+
 #ifdef CONFIG_SDHC0
 	const struct pio_desc sdmmc_pins[] = {
 		{"SDMMC0_CK",   AT91C_PIN_PA(0), 0, PIO_DEFAULT, PIO_PERIPH_A},
@@ -542,12 +552,20 @@ void at91_sdhc_hw_init(void)
 		{(char *)0, 0, 0, PIO_DEFAULT, PIO_PERIPH_A},
 	};
 #endif
+	/* First, print status of CAL for VDDSDMMC over-consumption errata */
+	pmc_enable_periph_clock(AT91C_ID_SDMMC0);
+	reg = readl(AT91C_BASE_SDHC0 + SDMMC_CALCR);
+	pmc_disable_periph_clock(AT91C_ID_SDMMC0);
 
+	if (reg & SDMMC_CALCR_ALWYSON)
+		dbg_info("SDHC: fix in place for SAMA5D2 SoM VDDSDMMC over-consumption errata\n");
+
+	/* Deal with usual SD/MCC peripheral init sequence */
 	pio_configure(sdmmc_pins);
 
-	pmc_sam9x5_enable_periph_clk(CONFIG_SYS_ID_SDHC);
-	pmc_enable_periph_generated_clk(CONFIG_SYS_ID_SDHC,
-					GCK_CSS_UPLL_CLK,
-					ATMEL_SDHC_GCKDIV_VALUE);
+	pmc_enable_periph_clock(CONFIG_SYS_ID_SDHC);
+	pmc_enable_generic_clock(CONFIG_SYS_ID_SDHC,
+				 GCK_CSS_UPLL_CLK,
+				 ATMEL_SDHC_GCKDIV_VALUE);
 }
 #endif
