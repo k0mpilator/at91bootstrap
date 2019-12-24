@@ -65,4 +65,8 @@
 #include "sama5d3_linea.h"
 #endif
 
+#ifdef CONFIG_SAMA5D27_SOM1_CUSTOM
+#include "sama5d27_som1_custom.h"
+#endif
+
 #endif

@@ -1,0 +1,2 @@
+config CONFIG_BOARDNAME
+	default "sama5d27_som1_custom"	if CONFIG_SAMA5D27_SOM1_CUSTOM

@@ -1,0 +1,2 @@
+config CONFIG_LINUX_KERNEL_ARG_STRING
+	default "ubi.mtd=5 root=ubi0:root1 rootfstype=ubifs console=ttyS0,115200 earlyprintk mtdparts=atmel_nand:256k(bootstrap)ro,512k(uboot)ro,256k(env1),256k(env2),-(sys)" if CONFIG_SAMA5D27_SOM1_CUSTOM
